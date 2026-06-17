@@ -1,0 +1,12 @@
+{
+  "name": "codex-pet",
+  "version": "1.0.0",
+  "description": "Codex Pet - Desktop Floating Character",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^31.0.0"
+  }
+}

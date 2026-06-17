@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Codex Pet</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: transparent; overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+    cursor: grab;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  body.dragging { cursor: grabbing; }
+  #stage {
+    position: absolute; inset: 0;
+    pointer-events: none;
+  }
+  #pet {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: 320px; height: 360px;
+    pointer-events: auto;
+    will-change: transform;
+  }
+  #pet svg { width: 100%; height: 100%; display: block; overflow: visible; }
+
+  #hud {
+    position: absolute;
+    right: 8px; top: 8px;
+    display: flex; gap: 6px;
+    pointer-events: auto;
+    opacity: 0.0;
+    transition: opacity .25s ease;
+  }
+  body:hover #hud { opacity: 0.85; }
+  .btn {
+    background: rgba(30,20,60,0.85);
+    color: #fff;
+    border: 1px solid rgba(180,160,255,0.5);
+    border-radius: 14px;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    pointer-events: auto;
+    letter-spacing: 0.5px;
+  }
+  .btn:hover { background: rgba(80,60,150,0.9); }
+  .btn.active { background: rgba(180,120,255,0.95); border-color: #fff; }
+
+  .keyhint {
+    position: absolute; left: 8px; bottom: 6px;
+    font-size: 10px; color: rgba(220,210,255,0.6);
+    pointer-events: none; opacity: 0.0;
+    transition: opacity .3s ease;
+  }
+  body:hover .keyhint { opacity: 0.8; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <div id="pet"></div>
+</div>
+
+<div id="hud">
+  <button class="btn" data-state="idle">IDLE</button>
+  <button class="btn" data-state="run">RUN</button>
+  <button class="btn" data-state="success">OK</button>
+  <button class="btn" data-state="fail">ERR</button>
+  <button class="btn" id="throughBtn">Click</button>
+</div>
+<div class="keyhint">[1] idle · [2] run · [3] success · [4] fail · drag to move</div>
+
+<script src="pet.js"></script>
+</body>
+</html>

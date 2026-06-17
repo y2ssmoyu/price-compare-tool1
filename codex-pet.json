@@ -1,0 +1,18 @@
+{
+  "character": "Codex Pet",
+  "states": {
+    "idle": { "frames": 8, "loop": true },
+    "run": { "frames": 12, "loop": true },
+    "success": { "frames": 10, "loop": false },
+    "fail": { "frames": 10, "loop": false }
+  },
+  "window": {
+    "alwaysOnTop": true,
+    "transparent": true,
+    "frameless": true
+  },
+  "physics": {
+    "runCycle": "180deg leg offset",
+    "feetMode": "energy_wheel"
+  }
+}
