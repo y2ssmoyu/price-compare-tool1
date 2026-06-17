@@ -1,18 +1,33 @@
 {
-  "character": "Codex Pet",
+  "name": "Codex Pet · Pixel Edition",
+  "version": "2.0.0",
+  "render": "pixel-sprite",
+  "sprite": {
+    "baseWidth": 64,
+    "baseHeight": 64,
+    "scale": 5,
+    "palette": "pixel-codex"
+  },
   "states": {
-    "idle": { "frames": 8, "loop": true },
-    "run": { "frames": 12, "loop": true },
-    "success": { "frames": 10, "loop": false },
-    "fail": { "frames": 10, "loop": false }
+    "idle":    { "frames": 8,  "loop": true,  "fps": 6,  "duration": 0 },
+    "run":     { "frames": 12, "loop": true,  "fps": 18, "duration": 0 },
+    "success": { "frames": 10, "loop": false, "fps": 12, "duration": 1500 },
+    "fail":    { "frames": 8,  "loop": false, "fps": 12, "duration": 1500 }
   },
   "window": {
     "alwaysOnTop": true,
     "transparent": true,
     "frameless": true
   },
-  "physics": {
-    "runCycle": "180deg leg offset",
-    "feetMode": "energy_wheel"
+  "controls": {
+    "keyboard": { "1": "idle", "2": "run", "3": "success", "4": "fail", "t": "toggle click-through" },
+    "drag": "move window"
+  },
+  "api": {
+    "startTask": "setState('run')",
+    "taskSuccess": "setState('success')",
+    "taskFail": "setState('fail')",
+    "idle": "setState('idle')",
+    "state": "current state name (readonly)"
   }
 }

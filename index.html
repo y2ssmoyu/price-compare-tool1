@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Codex Pet</title>
+<title>Codex Pet — Pixel Edition</title>
 <style>
   html, body {
     margin: 0; padding: 0; width: 100%; height: 100%;
@@ -20,11 +20,20 @@
     position: absolute;
     left: 50%; top: 50%;
     transform: translate(-50%, -50%);
-    width: 320px; height: 360px;
+    width: 320px; height: 320px;
     pointer-events: auto;
-    will-change: transform;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
   }
-  #pet svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  #pet canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+  }
 
   #hud {
     position: absolute;
@@ -36,26 +45,35 @@
   }
   body:hover #hud { opacity: 0.85; }
   .btn {
-    background: rgba(30,20,60,0.85);
+    background: rgba(42, 24, 69, 0.85);
     color: #fff;
-    border: 1px solid rgba(180,160,255,0.5);
-    border-radius: 14px;
+    border: 1px solid rgba(180, 120, 255, 0.6);
+    border-radius: 4px;
     padding: 4px 10px;
     font-size: 11px;
     cursor: pointer;
     pointer-events: auto;
-    letter-spacing: 0.5px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    font-family: 'Courier New', monospace;
+    box-shadow: inset 0 -2px 0 rgba(96, 32, 160, 0.6);
   }
-  .btn:hover { background: rgba(80,60,150,0.9); }
-  .btn.active { background: rgba(180,120,255,0.95); border-color: #fff; }
+  .btn:hover { background: rgba(80, 40, 130, 0.95); }
+  .btn.active {
+    background: rgba(144, 80, 208, 0.95);
+    border-color: #fff;
+    box-shadow: inset 0 -2px 0 rgba(255, 255, 255, 0.4);
+  }
 
   .keyhint {
     position: absolute; left: 8px; bottom: 6px;
-    font-size: 10px; color: rgba(220,210,255,0.6);
+    font-size: 10px; color: rgba(240, 224, 255, 0.7);
     pointer-events: none; opacity: 0.0;
     transition: opacity .3s ease;
+    font-family: 'Courier New', monospace;
+    letter-spacing: 1px;
   }
-  body:hover .keyhint { opacity: 0.8; }
+  body:hover .keyhint { opacity: 0.85; }
 </style>
 </head>
 <body>
@@ -65,11 +83,11 @@
 </div>
 
 <div id="hud">
-  <button class="btn" data-state="idle">IDLE</button>
-  <button class="btn" data-state="run">RUN</button>
-  <button class="btn" data-state="success">OK</button>
-  <button class="btn" data-state="fail">ERR</button>
-  <button class="btn" id="throughBtn">Click</button>
+  <button class="btn" data-state="idle">idle</button>
+  <button class="btn" data-state="run">run</button>
+  <button class="btn" data-state="success">ok</button>
+  <button class="btn" data-state="fail">err</button>
+  <button class="btn" id="throughBtn">click</button>
 </div>
 <div class="keyhint">[1] idle · [2] run · [3] success · [4] fail · drag to move</div>
 

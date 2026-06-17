@@ -1,7 +1,7 @@
 {
   "name": "codex-pet",
-  "version": "1.0.0",
-  "description": "Codex Pet - Desktop Floating Character",
+  "version": "2.0.0",
+  "description": "Codex Pet · Pixel Edition - Desktop floating pixel-art character",
   "main": "main.js",
   "scripts": {
     "start": "electron --no-sandbox ."

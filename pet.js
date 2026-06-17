@@ -1,753 +1,816 @@
-/* =====================================================================
-   Codex Pet · Desktop Floating Character
-   Procedural SVG sprite-frame animation + state machine + physics
-   ===================================================================== */
 (() => {
   'use strict';
 
-  // ------------------------------------------------------------------
-  // CONFIG — matches spec output
-  // ------------------------------------------------------------------
+  // ====================================================================
+  // CONFIG
+  // ====================================================================
   const STATES = {
     idle:    { frames: 8,  loop: true,  fps: 6,  duration: 0 },
     run:     { frames: 12, loop: true,  fps: 18, duration: 0 },
-    success: { frames: 10, loop: false, fps: 12, duration: 1000 },
-    fail:    { frames: 10, loop: false, fps: 12, duration: 1000 },
+    success: { frames: 10, loop: false, fps: 12, duration: 1500 },
+    fail:    { frames: 8,  loop: false, fps: 12, duration: 1500 },
   };
-  const VIEW = { w: 400, h: 400, anchorX: 200, anchorY: 360 };
 
-  // ------------------------------------------------------------------
-  // STATE
-  // ------------------------------------------------------------------
+  // Pixel-art base size (the "virtual canvas")
+  const SPRITE_W = 64;
+  const SPRITE_H = 64;
+  // Scale factor for display
+  const SCALE = 5;
+  const DISPLAY_W = SPRITE_W * SCALE; // 320
+  const DISPLAY_H = SPRITE_H * SCALE; // 320
+
+  // Pixel-art palette
+  const PAL = {
+    outline:  '#2a1845',
+    hair:     '#ffffff',
+    hairSh:   '#d8c8f0',
+    hairSh2:  '#b8a8d0',
+    skin:     '#f4c9a8',
+    skinSh:   '#d9a878',
+    eyeWhite: '#ffffff',
+    eyeIris:  '#b03040',
+    eyePupil: '#1a0f2e',
+    cheek:    '#ff98b8',
+    mouth:    '#5a2a45',
+    tongue:   '#ff7a9a',
+    coat:     '#ffffff',
+    coatSh:   '#e8d8f8',
+    coatLine: '#b8a8d0',
+    sash:     '#9050d0',
+    sashSh:   '#6020a0',
+    straw:    '#d9a860',
+    strawSh:  '#8c6030',
+    scar:     '#b85450',
+    cloud:    '#ffffff',
+    cloudSh:  '#d8c8f0',
+    cloudSh2: '#b8a8d0',
+    sparkle:  '#ffd94d',
+    sparkleSh:'#b08020',
+    stress:   '#1a0f2e',
+    bg:       null,
+  };
+
+  // ====================================================================
+  // PIXEL-ART DRAWING HELPERS
+  // Each helper draws at the low-resolution (SPRITE_W x SPRITE_H)
+  // coordinate system. These primitives combined produce a complete
+  // character sprite (one frame).
+  // ====================================================================
+  function px(ctx, x, y, color) {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, 1, 1);
+  }
+  function pxRect(ctx, x, y, w, h, color) {
+    if (w <= 0 || h <= 0) return;
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w, h);
+  }
+  function pxHLine(ctx, x1, x2, y, color) {
+    const a = Math.min(x1, x2), b = Math.max(x1, x2);
+    pxRect(ctx, a, y, b - a + 1, 1, color);
+  }
+  function pxVLine(ctx, x, y1, y2, color) {
+    const a = Math.min(y1, y2), b = Math.max(y1, y2);
+    pxRect(ctx, x, a, 1, b - a + 1, color);
+  }
+  // Pixel ellipse (rounded rect-style, axis aligned)
+  function pxEllipse(ctx, cx, cy, rx, ry, color) {
+    for (let y = -ry; y <= ry; y++) {
+      const dx = Math.round(rx * Math.sqrt(1 - (y * y) / (ry * ry)));
+      if (isNaN(dx)) continue;
+      for (let x = -dx; x <= dx; x++) {
+        px(ctx, cx + x, cy + y, color);
+      }
+    }
+  }
+  function pxCircle(ctx, cx, cy, r, color) {
+    pxEllipse(ctx, cx, cy, r, r, color);
+  }
+  // Pixel outline of ellipse (edge only)
+  function pxEllipseStroke(ctx, cx, cy, rx, ry, color) {
+    for (let y = -ry; y <= ry; y++) {
+      const dx = Math.round(rx * Math.sqrt(1 - (y * y) / (ry * ry)));
+      if (isNaN(dx)) continue;
+      px(ctx, cx - dx, cy + y, color);
+      px(ctx, cx + dx, cy + y, color);
+    }
+    for (let x = -rx; x <= rx; x++) {
+      const dy = Math.round(ry * Math.sqrt(1 - (x * x) / (rx * rx)));
+      if (isNaN(dy)) continue;
+      px(ctx, cx + x, cy - dy, color);
+      px(ctx, cx + x, cy + dy, color);
+    }
+  }
+  // Rectangle outline
+  function pxRectStroke(ctx, x, y, w, h, color) {
+    pxHLine(ctx, x, x + w - 1, y, color);
+    pxHLine(ctx, x, x + w - 1, y + h - 1, color);
+    pxVLine(ctx, x, y, y + h - 1, color);
+    pxVLine(ctx, x + w - 1, y, y + h - 1, color);
+  }
+
+  // ====================================================================
+  // CHARACTER PARTS (drawn as complete pixel-art regions)
+  //
+  // drawCloud  - fluffy cloud platform under feet
+  // drawHair   - big fluffy cloud-like white hair on top
+  // drawFace   - oval head with eyes + mouth (opts for expression)
+  // drawBody   - white coat + purple sash
+  // drawArms   - left + right arms (at pose positions)
+  // drawLegs   - legs + sandals (at pose positions)
+  //
+  // Each function draws pixels into the frame at its designated area
+  // relative to the 64x64 character canvas (NOT separate world coords).
+  // ====================================================================
+
+  function drawCloud(ctx, squash, stretch, shakeX, baseY) {
+    // baseY = top row of cloud. Cloud drawn from baseY down.
+    // squash: 0 normal, -1 narrow, +1 wide
+    const by = baseY;
+    const cx = 32 + shakeX;
+    const rowColor = (topY, widthLeft, widthRight, color) => {
+      pxHLine(ctx, cx - widthLeft, cx + widthRight - 1, topY, color);
+    };
+    // Cloud shape — stacked horizontal rows, bumpy top
+    const top = [
+      // y, leftW, rightW, color
+      [by,     4, 4, PAL.cloud],  // small peak center
+      [by + 1, 6, 7, PAL.cloud],
+      [by + 2, 9, 9, PAL.cloud],
+    ];
+    for (const [y, lw, rw, col] of top) rowColor(y, lw, rw, col);
+    // Main body
+    for (let i = 0; i < 3; i++) {
+      rowColor(by + 3 + i, 14 + stretch, 14 + stretch, PAL.cloud);
+    }
+    // Fluffy bumps on top row (little puffs)
+    for (let i = 0; i < 3; i++) {
+      pxCircle(ctx, cx - 10 + i * 10, by, 2, PAL.cloud);
+    }
+    pxCircle(ctx, cx - 15, by + 1, 2, PAL.cloud);
+    pxCircle(ctx, cx + 15, by + 1, 2, PAL.cloud);
+    // Shadow row at bottom of cloud
+    rowColor(by + 6, 14 + stretch, 14 + stretch, PAL.cloudSh);
+    rowColor(by + 6, 10 + stretch, 10 + stretch, PAL.cloud); // peek through middle
+    // Little bottom curve ends
+    pxHLine(ctx, cx - 18 - stretch, cx - 14 - stretch, by + 4, PAL.cloud);
+    pxHLine(ctx, cx + 14 + stretch, cx + 18 + stretch, by + 4, PAL.cloud);
+    // Outline / darker edges
+    pxHLine(ctx, cx - 18 - stretch, cx - 15 - stretch, by + 5, PAL.cloudSh);
+    pxHLine(ctx, cx + 15 + stretch, cx + 18 + stretch, by + 5, PAL.cloudSh);
+    pxHLine(ctx, cx - 20 - stretch, cx - 15 - stretch, by + 5, PAL.cloud);
+    pxHLine(ctx, cx + 15 + stretch, cx + 20 + stretch, by + 5, PAL.cloud);
+    // Bottom shadow line
+    pxHLine(ctx, cx - 18 - stretch, cx + 18 + stretch, by + 7, PAL.cloudSh2);
+    // Bottom cloud dark pixels
+    pxHLine(ctx, cx - 12, cx + 12, by + 6, PAL.cloudSh);
+    pxHLine(ctx, cx - 8, cx + 8, by + 6, PAL.cloud);
+  }
+
+  // Draw fluffy hair (big cloud-like hair on top of head)
+  // baseY is top of hair. Uses y range baseY to baseY+18 typically.
+  function drawHair(ctx, faceCx, baseY, bob) {
+    // Large fluffy hair blob on top. Approximate a cloud shape.
+    const cx = faceCx;
+    const topY = baseY + bob;
+
+    // Peak puffs (little round puffs sticking up)
+    pxCircle(ctx, cx - 10, topY + 2, 3, PAL.hair);
+    pxCircle(ctx, cx, topY, 4, PAL.hair);
+    pxCircle(ctx, cx + 10, topY + 2, 3, PAL.hair);
+    pxCircle(ctx, cx - 6, topY - 1, 3, PAL.hair);
+    pxCircle(ctx, cx + 5, topY - 1, 3, PAL.hair);
+
+    // Main hair mass — several rows, widest at middle
+    const rows = [
+      // y offset, half-width, color
+      [2,  14, PAL.hair],
+      [4,  16, PAL.hair],
+      [6,  17, PAL.hair],
+      [8,  18, PAL.hair],
+      [10, 17, PAL.hair],
+      [12, 15, PAL.hair],
+      [14, 12, PAL.hair],
+    ];
+    for (const [oy, hw, col] of rows) {
+      pxHLine(ctx, cx - hw, cx + hw, topY + oy, col);
+    }
+
+    // Side hair extending down the face (framing)
+    for (let i = 0; i < 8; i++) {
+      pxRect(ctx, cx - 18 + (i > 5 ? 1 : 0), topY + 8 + i, 2, 1, PAL.hair);
+      pxRect(ctx, cx + 16 - (i > 5 ? 1 : 0), topY + 8 + i, 2, 1, PAL.hair);
+    }
+
+    // Shading — darker pixels along bottom edges for depth
+    pxHLine(ctx, cx - 17, cx - 13, topY + 12, PAL.hairSh);
+    pxHLine(ctx, cx + 13, cx + 17, topY + 12, PAL.hairSh);
+    pxHLine(ctx, cx - 15, cx - 12, topY + 13, PAL.hairSh);
+    pxHLine(ctx, cx + 12, cx + 15, topY + 13, PAL.hairSh);
+
+    // Little front bangs (triangle-ish)
+    pxHLine(ctx, cx - 3, cx + 3, topY + 10, PAL.hair);
+    pxHLine(ctx, cx - 2, cx + 2, topY + 11, PAL.hair);
+    pxHLine(ctx, cx - 1, cx + 1, topY + 12, PAL.hair);
+
+    // Hair outline pixels (darker edges)
+    // Left & right outer edge of hair
+    for (let i = 0; i < 14; i++) {
+      const hw = rows[Math.min(Math.floor(i / 2), rows.length - 1)][1];
+      if (i < 2 || i > 12) continue;
+      px(ctx, cx - hw - 1, topY + i, PAL.hairSh);
+      px(ctx, cx + hw + 1, topY + i, PAL.hairSh);
+    }
+    // Top outline
+    px(ctx, cx - 15, topY + 2, PAL.hairSh);
+    px(ctx, cx + 15, topY + 2, PAL.hairSh);
+    px(ctx, cx - 12, topY, PAL.hairSh);
+    px(ctx, cx + 12, topY, PAL.hairSh);
+    px(ctx, cx - 4, topY - 2, PAL.hairSh);
+    px(ctx, cx + 4, topY - 2, PAL.hairSh);
+  }
+
+  // Draw face: oval shape with eyes + mouth. opts controls expression.
+  function drawFace(ctx, faceCx, faceCy, opts) {
+    const { smile = true, laugh = false, shocked = false,
+            eyesClosed = false, tongueOut = false, blink = false,
+            bodyTilt = 0 } = opts;
+
+    // Head shape - oval-ish, built up row by row for pixel precision
+    // Half-width per row (relative to cx), centered at faceCy vertically
+    const halfW = [7, 9, 10, 11, 12, 12, 12, 11, 10, 9, 8, 6]; // row y offset from top
+    const topY = faceCy - Math.floor(halfW.length / 2);
+
+    // Fill face
+    for (let i = 0; i < halfW.length; i++) {
+      const hw = halfW[i];
+      pxHLine(ctx, faceCx - hw, faceCx + hw, topY + i, PAL.skin);
+    }
+
+    // Outline for head
+    for (let i = 0; i < halfW.length; i++) {
+      const hw = halfW[i];
+      px(ctx, faceCx - hw - 1, topY + i, PAL.outline);
+      px(ctx, faceCx + hw + 1, topY + i, PAL.outline);
+    }
+    // Top & bottom cap pixels
+    px(ctx, faceCx - 2, topY - 1, PAL.outline);
+    px(ctx, faceCx - 1, topY - 1, PAL.outline);
+    px(ctx, faceCx, topY - 1, PAL.outline);
+    px(ctx, faceCx + 1, topY - 1, PAL.outline);
+    px(ctx, faceCx + 2, topY - 1, PAL.outline);
+    // Bottom rounded
+    px(ctx, faceCx - 3, topY + halfW.length, PAL.outline);
+    px(ctx, faceCx - 2, topY + halfW.length, PAL.outline);
+    px(ctx, faceCx - 1, topY + halfW.length, PAL.outline);
+    px(ctx, faceCx, topY + halfW.length, PAL.outline);
+    px(ctx, faceCx + 1, topY + halfW.length, PAL.outline);
+    px(ctx, faceCx + 2, topY + halfW.length, PAL.outline);
+    px(ctx, faceCx + 3, topY + halfW.length, PAL.outline);
+    // Connect bottom
+    pxHLine(ctx, faceCx - 4, faceCx - 3, topY + halfW.length - 1, PAL.skin);
+    pxHLine(ctx, faceCx + 3, faceCx + 4, topY + halfW.length - 1, PAL.skin);
+
+    // Shading (skin shadow) - along jawline
+    px(ctx, faceCx - 7, topY + 10, PAL.skinSh);
+    px(ctx, faceCx - 8, topY + 8, PAL.skinSh);
+    px(ctx, faceCx + 7, topY + 10, PAL.skinSh);
+    px(ctx, faceCx + 8, topY + 8, PAL.skinSh);
+
+    // ---- EYES ----
+    // Eye position: roughly at faceCy - 2 (middle-upper of face)
+    const eyeY = faceCy - 1;
+    const leftEyeX = faceCx - 5;
+    const rightEyeX = faceCx + 4;
+
+    if (blink || eyesClosed) {
+      // Closed eye: horizontal line
+      pxHLine(ctx, leftEyeX - 1, leftEyeX + 1, eyeY, PAL.outline);
+      pxHLine(ctx, rightEyeX - 1, rightEyeX + 1, eyeY, PAL.outline);
+      // curved ^ line
+      px(ctx, leftEyeX, eyeY - 1, PAL.outline);
+      px(ctx, rightEyeX, eyeY - 1, PAL.outline);
+    } else if (shocked) {
+      // Big round eyes
+      pxEllipse(ctx, leftEyeX, eyeY, 2, 2, PAL.eyeWhite);
+      pxEllipse(ctx, rightEyeX, eyeY, 2, 2, PAL.eyeWhite);
+      pxCircle(ctx, leftEyeX, eyeY, 1, PAL.eyePupil);
+      pxCircle(ctx, rightEyeX, eyeY, 1, PAL.eyePupil);
+      // outline
+      pxEllipseStroke(ctx, leftEyeX, eyeY, 2, 2, PAL.outline);
+      pxEllipseStroke(ctx, rightEyeX, eyeY, 2, 2, PAL.outline);
+      // highlight
+      px(ctx, leftEyeX - 1, eyeY - 1, PAL.eyeWhite);
+      px(ctx, rightEyeX - 1, eyeY - 1, PAL.eyeWhite);
+    } else {
+      // Normal eyes: small dark dots with a colored iris around
+      pxEllipse(ctx, leftEyeX, eyeY, 1, 2, PAL.eyeIris);
+      pxEllipse(ctx, rightEyeX, eyeY, 1, 2, PAL.eyeIris);
+      px(ctx, leftEyeX, eyeY + 1, PAL.eyePupil);
+      px(ctx, rightEyeX, eyeY + 1, PAL.eyePupil);
+      px(ctx, leftEyeX, eyeY, PAL.eyePupil);
+      px(ctx, rightEyeX, eyeY, PAL.eyePupil);
+      // Little eye-white highlight
+      px(ctx, leftEyeX - 1, eyeY - 1, PAL.eyeWhite);
+      px(ctx, rightEyeX - 1, eyeY - 1, PAL.eyeWhite);
+      // outline around eye (just top pixels for style)
+      px(ctx, leftEyeX - 2, eyeY, PAL.outline);
+      px(ctx, leftEyeX + 1, eyeY, PAL.outline);
+      px(ctx, rightEyeX - 1, eyeY, PAL.outline);
+      px(ctx, rightEyeX + 2, eyeY, PAL.outline);
+    }
+
+    // ---- SCAR under left eye (small cross mark) ----
+    pxHLine(ctx, leftEyeX - 4, leftEyeX - 2, eyeY + 3, PAL.scar);
+    pxVLine(ctx, leftEyeX - 3, eyeY + 2, eyeY + 4, PAL.scar);
+
+    // ---- CHEEKS (pink blush) ----
+    px(ctx, faceCx - 8, eyeY + 3, PAL.cheek);
+    px(ctx, faceCx - 7, eyeY + 3, PAL.cheek);
+    px(ctx, faceCx + 6, eyeY + 3, PAL.cheek);
+    px(ctx, faceCx + 7, eyeY + 3, PAL.cheek);
+
+    // ---- MOUTH ----
+    const mouthY = faceCy + 3;
+    if (laugh) {
+      // Laugh: big open curved mouth
+      pxHLine(ctx, faceCx - 3, faceCx + 3, mouthY, PAL.mouth);
+      pxHLine(ctx, faceCx - 2, faceCx + 2, mouthY + 1, PAL.mouth);
+      pxHLine(ctx, faceCx - 1, faceCx + 1, mouthY + 2, PAL.mouth);
+      // Pink interior (tongue-ish)
+      pxHLine(ctx, faceCx - 2, faceCx + 2, mouthY, PAL.tongue);
+    } else if (shocked) {
+      // Shocked: small open circle mouth
+      pxEllipse(ctx, faceCx, mouthY + 1, 1, 2, PAL.mouth);
+      if (tongueOut) {
+        // tongue sticking out
+        pxRect(ctx, faceCx - 1, mouthY + 2, 3, 2, PAL.tongue);
+      }
+    } else if (smile) {
+      // Smile: small curved line
+      pxHLine(ctx, faceCx - 2, faceCx + 2, mouthY, PAL.mouth);
+      px(ctx, faceCx - 3, mouthY - 1, PAL.mouth);
+      px(ctx, faceCx + 3, mouthY - 1, PAL.mouth);
+    } else {
+      // Neutral / determined: straight line
+      pxHLine(ctx, faceCx - 2, faceCx + 2, mouthY, PAL.mouth);
+    }
+  }
+
+  // Body (coat + sash). Painted as one coherent torso region.
+  // bodyTop = top row for coat. width = half-width.
+  function drawBody(ctx, bodyCx, bodyTop, h, opts) {
+    const { coatOpen = false, tilt = 0 } = opts;
+
+    // Coat rows (slightly trapezoid: narrower at top, wider at bottom)
+    const halfWTop = 10 + tilt;
+    const halfWBot = 13;
+    for (let i = 0; i < h; i++) {
+      const t = i / h;
+      const hw = Math.round(halfWTop + (halfWBot - halfWTop) * t);
+      pxHLine(ctx, bodyCx - hw, bodyCx + hw, bodyTop + i, PAL.coat);
+    }
+    // Coat outline + shoulder area
+    for (let i = 0; i < h; i++) {
+      const t = i / h;
+      const hw = Math.round(halfWTop + (halfWBot - halfWTop) * t);
+      px(ctx, bodyCx - hw - 1, bodyTop + i, PAL.coatLine);
+      px(ctx, bodyCx + hw + 1, bodyTop + i, PAL.coatLine);
+    }
+    // Top "V" neck area — shoulder caps instead of a real collar
+    pxCircle(ctx, bodyCx - 11, bodyTop, 2, PAL.coat);
+    pxCircle(ctx, bodyCx + 11, bodyTop, 2, PAL.coat);
+    px(ctx, bodyCx - 12, bodyTop, PAL.coatLine);
+    px(ctx, bodyCx + 12, bodyTop, PAL.coatLine);
+
+    // Center front detail (little buttons / placket)
+    if (coatOpen) {
+      pxVLine(ctx, bodyCx, bodyTop + 2, bodyTop + h - 3, PAL.coatLine);
+    } else {
+      // Buttons
+      for (let i = 0; i < 3; i++) {
+        pxRect(ctx, bodyCx - 1, bodyTop + 4 + i * 4, 3, 1, PAL.strawSh);
+        pxRect(ctx, bodyCx, bodyTop + 4 + i * 4, 1, 1, PAL.straw);
+      }
+    }
+
+    // Sash / belt — diagonal + horizontal purple band
+    const sashY = bodyTop + h - 5;
+    for (let i = 0; i < 3; i++) {
+      const offset = i - 1; // diagonal tilt
+      pxHLine(ctx, bodyCx - 12 - Math.abs(offset),
+              bodyCx + 12 + Math.abs(offset),
+              sashY + i, PAL.sash);
+    }
+    // Sash outline
+    pxHLine(ctx, bodyCx - 14, bodyCx + 14, sashY - 1, PAL.sashSh);
+    pxHLine(ctx, bodyCx - 14, bodyCx + 14, sashY + 3, PAL.sashSh);
+    for (let i = -14; i <= 14; i += 4) {
+      px(ctx, bodyCx + i, sashY, PAL.sashSh);
+    }
+    // Sash trailing tail (diagonal flap)
+    for (let i = 0; i < 5; i++) {
+      pxHLine(ctx, bodyCx + 10 + i, bodyCx + 12 + i, sashY + 3 + i, PAL.sash);
+      px(ctx, bodyCx + 13 + i, sashY + 3 + i, PAL.sashSh);
+    }
+    pxRect(ctx, bodyCx + 10, sashY + 3, 4, 1, PAL.sashSh);
+    // Knot / bow at center
+    pxRect(ctx, bodyCx - 3, sashY + 1, 6, 2, PAL.sashSh);
+    pxRect(ctx, bodyCx - 2, sashY + 1, 4, 2, PAL.sash);
+    px(ctx, bodyCx - 3, sashY + 1, PAL.outline);
+    px(ctx, bodyCx + 3, sashY + 1, PAL.outline);
+
+    // Coat shading (shadow along bottom of coat, below sash)
+    const shortsTop = sashY + 3;
+    const shortsH = 4;
+    for (let i = 0; i < shortsH; i++) {
+      pxHLine(ctx, bodyCx - 10, bodyCx + 10, shortsTop + i, PAL.coat);
+    }
+    // Leg gap between shorts
+    pxVLine(ctx, bodyCx, shortsTop + shortsH - 2, shortsTop + shortsH, PAL.coatSh);
+    // Shorts outline
+    pxRectStroke(ctx, bodyCx - 11, shortsTop, 22, shortsH + 1, PAL.coatLine);
+    // Leg opening marks
+    px(ctx, bodyCx - 7, shortsTop + shortsH + 1, PAL.coatLine);
+    px(ctx, bodyCx + 6, shortsTop + shortsH + 1, PAL.coatLine);
+  }
+
+  // Arms: drawn as simple rectangular sleeves + hands
+  // pose: 'down' | 'up' | 'forward' | 'back'
+  function drawArms(ctx, bodyCx, bodyTop, leftPose, rightPose) {
+    const armColor = PAL.coat;
+    const armOutline = PAL.coatLine;
+    const handColor = PAL.skin;
+    const handOutline = PAL.skinSh;
+
+    function drawOneArm(shoulderX, shoulderY, pose, isLeft) {
+      if (pose === 'down') {
+        // Sleeve
+        pxRect(ctx, shoulderX - 2, shoulderY, 4, 5, armColor);
+        pxRectStroke(ctx, shoulderX - 2, shoulderY, 4, 5, armOutline);
+        // Hand at bottom
+        pxRect(ctx, shoulderX - 2, shoulderY + 5, 4, 2, handColor);
+        px(ctx, shoulderX - 3, shoulderY + 5, handOutline);
+        px(ctx, shoulderX + 2, shoulderY + 5, handOutline);
+      } else if (pose === 'up') {
+        // Arm raised up
+        pxRect(ctx, shoulderX - 2, shoulderY - 6, 4, 5, armColor);
+        pxRectStroke(ctx, shoulderX - 2, shoulderY - 6, 4, 5, armOutline);
+        // Hand at top (raised fist)
+        pxRect(ctx, shoulderX - 3, shoulderY - 9, 6, 3, handColor);
+        pxRectStroke(ctx, shoulderX - 3, shoulderY - 9, 6, 3, handOutline);
+      } else if (pose === 'forward') {
+        // Arm angled forward-down
+        pxRect(ctx, shoulderX - 2, shoulderY + 2, 4, 5, armColor);
+        pxRectStroke(ctx, shoulderX - 2, shoulderY + 2, 4, 5, armOutline);
+        pxRect(ctx, shoulderX - 2, shoulderY + 7, 4, 2, handColor);
+      } else if (pose === 'back') {
+        // Arm swung back
+        pxRect(ctx, shoulderX - 2, shoulderY - 1, 4, 5, armColor);
+        pxRectStroke(ctx, shoulderX - 2, shoulderY - 1, 4, 5, armOutline);
+        pxRect(ctx, shoulderX - 2, shoulderY + 4, 4, 2, handColor);
+      } else if (pose === 'wave') {
+        // Bent arm, hand near head
+        pxRect(ctx, shoulderX - 2, shoulderY - 2, 4, 3, armColor);
+        pxRectStroke(ctx, shoulderX - 2, shoulderY - 2, 4, 3, armOutline);
+        pxRect(ctx, shoulderX - 3, shoulderY - 5, 4, 3, armColor);
+        pxRectStroke(ctx, shoulderX - 3, shoulderY - 5, 4, 3, armOutline);
+        pxRect(ctx, shoulderX - 2, shoulderY - 7, 4, 2, handColor);
+      } else if (pose === 'clasp') {
+        // Hands clasped at chest level
+        pxRect(ctx, shoulderX - 2, shoulderY, 4, 3, armColor);
+        pxRectStroke(ctx, shoulderX - 2, shoulderY, 4, 3, armOutline);
+      }
+    }
+
+    const shoulderY = bodyTop + 2;
+    const lx = bodyCx - 11;
+    const rx = bodyCx + 9;
+    drawOneArm(lx, shoulderY, leftPose, true);
+    drawOneArm(rx, shoulderY, rightPose, false);
+  }
+
+  // Legs + sandals. leftYOff, rightYOff = vertical offset per leg (for run)
+  function drawLegs(ctx, bodyCx, shortsBottom, leftYOff, rightYOff, stance, shakeX) {
+    const legColor = PAL.skin;
+    const legOutline = PAL.skinSh;
+    const sandalColor = PAL.straw;
+    const sandalOutline = PAL.strawSh;
+
+    function drawOneLeg(legCx, yOff, stanceIn) {
+      const topY = shortsBottom + yOff;
+      const width = (stanceIn === 'wide') ? 3 : 3;
+      const height = (stanceIn === 'bent') ? 3 : 5;
+
+      // Leg (pants / shorts continuation)
+      pxRect(ctx, legCx - Math.floor(width / 2), topY, width, height, PAL.coat);
+      pxRectStroke(ctx, legCx - Math.floor(width / 2), topY, width, height, PAL.coatLine);
+      // Skin below (lower leg)
+      const skinY = topY + height;
+      pxRect(ctx, legCx - 1, skinY, 3, 2, legColor);
+      // Sandal
+      pxRect(ctx, legCx - 2, skinY + 2, 5, 2, sandalColor);
+      // Sandal outline
+      pxRectStroke(ctx, legCx - 3, skinY + 2, 5, 2, sandalOutline);
+      // Thong strap (the T-shape between toes)
+      px(ctx, legCx, skinY + 1, sandalOutline);
+      // Foot shape
+      pxRect(ctx, legCx - 2, skinY + 3, 5, 1, sandalColor);
+      // Sandal side strap
+      pxHLine(ctx, legCx - 3, legCx + 2, skinY + 3, sandalOutline);
+    }
+
+    const cx = bodyCx + shakeX;
+    drawOneLeg(cx - 7, leftYOff, stance);
+    drawOneLeg(cx + 6, rightYOff, stance);
+  }
+
+  // ====================================================================
+  // COMPLETE FRAME RENDERING — one frame = one full character image
+  // drawCompleteFrame(ctx, state, frame) paints the ENTIRE 64x64 sprite
+  // using pixel primitives, without relying on external world offsets.
+  // ====================================================================
+
+  function drawCompleteFrame(ctx, state, frame, total) {
+    // Clear the sprite frame
+    ctx.clearRect(0, 0, SPRITE_W, SPRITE_H);
+
+    // Common anchor: head center horizontal x=32
+    const FACE_CX = 32;
+    // Character layout:
+    //   cloud (bottom) at y=56-63
+    //   feet/sandals y=52-56
+    //   shorts y=44-52
+    //   body/coat y=32-48
+    //   sash y=43-46
+    //   head y=14-30
+    //   hair top y=2-16
+    //   (approximate — each state adjusts by small pose offsets)
+
+    if (state === 'idle') {
+      // Idle: gentle breathing bob + occasional blink
+      const t = frame / total;
+      const bob = Math.round(Math.sin(t * Math.PI * 2) * 1);
+      const blink = (frame === Math.floor(total * 0.75));
+
+      // Cloud
+      drawCloud(ctx, 0, 0, 0, 55);
+      // Legs slightly apart, standing still
+      drawLegs(ctx, FACE_CX, 50 + bob, 0, 0, 'normal', 0);
+      // Body (coat) with slight breath squash
+      drawBody(ctx, FACE_CX, 33 + bob, 15, { coatOpen: false, tilt: Math.sin(t * Math.PI * 2) * 0 });
+      drawArms(ctx, FACE_CX, 33 + bob, 'down', 'down');
+      // Hair (big fluffy)
+      drawHair(ctx, FACE_CX, 3, bob);
+      // Face (smile, maybe blink)
+      drawFace(ctx, FACE_CX, 21 + bob, { smile: true, blink });
+
+    } else if (state === 'run') {
+      // Run: 12-frame run cycle. Legs alternate, arms swing, body tilted.
+      const t = frame / total;
+      const cycle = t * Math.PI * 2;
+      const tilt = Math.round(Math.sin(cycle) * 1); // body lean
+      const bob = Math.abs(Math.round(Math.sin(cycle) * 1));
+
+      // Cloud trail (draw a slightly more compact cloud on the sprite,
+      // with speed-motion extra fluff)
+      drawCloud(ctx, 0, 1, tilt, 56 - bob);
+      // motion streaks behind
+      for (let i = 0; i < 4; i++) {
+        pxHLine(ctx, 55 - i * 2, 62, 56 - i, PAL.cloudSh);
+      }
+
+      // Legs: phase-offset running
+      // Compute per-leg vertical offset from cycle
+      const leftLegOff = Math.round(Math.sin(cycle) * 2);
+      const rightLegOff = Math.round(Math.sin(cycle + Math.PI) * 2);
+      drawLegs(ctx, FACE_CX - tilt, 50 - bob,
+               leftLegOff, rightLegOff,
+               frame % 2 === 0 ? 'normal' : 'bent',
+               0);
+
+      // Body — slight forward lean (shift + tilt)
+      drawBody(ctx, FACE_CX - tilt, 33 - bob, 15,
+               { coatOpen: false, tilt: 0 });
+
+      // Arms swing opposite to same-side leg
+      const armPhaseL = Math.round(Math.sin(cycle + Math.PI) * 2);
+      const armPhaseR = Math.round(Math.sin(cycle) * 2);
+      const leftPose = armPhaseL > 0 ? 'forward' : 'back';
+      const rightPose = armPhaseR > 0 ? 'back' : 'forward';
+      drawArms(ctx, FACE_CX - tilt, 33 - bob, leftPose, rightPose);
+
+      // Hair (slight wind effect)
+      drawHair(ctx, FACE_CX - tilt, 3, bob);
+      // Face — determined (neutral mouth, no smile)
+      drawFace(ctx, FACE_CX - tilt, 21 - bob,
+               { smile: false, shocked: false });
+
+    } else if (state === 'success') {
+      // Success: celebration bounce. Character leans back with arms up,
+      // slight rotation, sparkles.
+      const t = frame / total;
+      const bounce = Math.round(Math.abs(Math.sin(t * Math.PI * 3)) * 2);
+      const back = Math.round(Math.sin(t * Math.PI * 2) * 1); // lean back
+
+      // Cloud (squished by bounce)
+      drawCloud(ctx, 0, bounce > 1 ? 1 : 0, 0, 58 - bounce);
+
+      // Legs splayed out & knees bent slightly
+      drawLegs(ctx, FACE_CX, 48 - bounce, back, -back, 'bent', 0);
+      // Body tilted back, arms up
+      drawBody(ctx, FACE_CX - back, 34 - bounce, 14,
+               { coatOpen: true, tilt: 0 });
+      drawArms(ctx, FACE_CX - back, 34 - bounce, 'up', 'wave');
+
+      // Hair — still on top but shifted with lean
+      drawHair(ctx, FACE_CX - back, 4, -bounce);
+      // Laughing face
+      drawFace(ctx, FACE_CX - back, 22 - bounce,
+               { laugh: true, eyesClosed: true });
+
+      // Sparkle stars around character — appear as frame progresses
+      const sparkles = [
+        [12, 10, 2], [52, 8, 2], [8, 40, 2],
+        [56, 30, 2], [14, 50, 2], [50, 48, 2],
+        [32, 2, 2],
+      ];
+      const count = Math.min(sparkles.length, Math.floor(t * 10));
+      for (let i = 0; i < count; i++) {
+        const [sx, sy, sr] = sparkles[(i + frame) % sparkles.length];
+        drawSparkle(ctx, sx, sy, sr);
+      }
+
+    } else if (state === 'fail') {
+      // Fail: shocked / worried. Character shakes, stress marks,
+      // maybe tongue out, wide eyes.
+      const t = frame / total;
+      const shakeX = Math.round(Math.sin(frame * 3) * 1);
+      const shakeY = Math.round(Math.cos(frame * 3) * 1);
+
+      // Cloud
+      drawCloud(ctx, 0, 0, shakeX, 55 + shakeY);
+      // Legs apart, slightly bent
+      drawLegs(ctx, FACE_CX, 50 + shakeY, 0, 0, 'wide', shakeX);
+      // Body
+      drawBody(ctx, FACE_CX + shakeX, 33 + shakeY, 15,
+               { coatOpen: true, tilt: 0 });
+      drawArms(ctx, FACE_CX + shakeX, 33 + shakeY, 'up', 'up');
+      // Hair
+      drawHair(ctx, FACE_CX + shakeX, 3, shakeY);
+      // Shocked face
+      drawFace(ctx, FACE_CX + shakeX, 21 + shakeY,
+               { shocked: true, tongueOut: (frame % 2 === 0) });
+
+      // Stress lines (vertical squiggles on right side)
+      const lineX = 48 + shakeX;
+      for (let i = 0; i < 6; i++) {
+        px(ctx, lineX + (i % 2 === 0 ? 0 : 1), 12 + i * 3, PAL.stress);
+        px(ctx, lineX + 3, 14 + i * 3, PAL.stress);
+        px(ctx, 10 - shakeX + (i % 2), 12 + i * 3, PAL.stress);
+      }
+      // "!?" popup bubble pixels (top right)
+      if (frame % 4 < 3) {
+        drawPopupPunct(ctx, 50 + shakeX, 6);
+      }
+    }
+  }
+
+  // A little 4-point sparkle star (plus shape)
+  function drawSparkle(ctx, cx, cy, size) {
+    const col = PAL.sparkle;
+    const outline = PAL.sparkleSh;
+    // Plus shape
+    pxHLine(ctx, cx - size, cx + size, cy, col);
+    pxVLine(ctx, cx, cy - size, cy + size, col);
+    // Diagonal pixels for sparkle effect
+    if (size >= 2) {
+      px(ctx, cx - 1, cy - 1, col);
+      px(ctx, cx + 1, cy - 1, col);
+      px(ctx, cx - 1, cy + 1, col);
+      px(ctx, cx + 1, cy + 1, col);
+    }
+    // Outline corners
+    px(ctx, cx - size - 1, cy, outline);
+    px(ctx, cx + size + 1, cy, outline);
+    px(ctx, cx, cy - size - 1, outline);
+    px(ctx, cx, cy + size + 1, outline);
+    // Center bright
+    px(ctx, cx, cy, PAL.cloud);
+  }
+
+  // Tiny "!?" bubble for fail state
+  function drawPopupPunct(ctx, bx, by) {
+    // Bubble circle
+    pxCircle(ctx, bx + 4, by + 5, 6, PAL.cloud);
+    pxEllipseStroke(ctx, bx + 4, by + 5, 6, 6, PAL.sashSh);
+    // "!"
+    pxVLine(ctx, bx, by + 2, by + 6, PAL.outline);
+    px(ctx, bx, by + 8, PAL.outline);
+    // "?"
+    pxHLine(ctx, bx + 5, bx + 7, by + 2, PAL.outline);
+    px(ctx, bx + 5, by + 3, PAL.outline);
+    pxHLine(ctx, bx + 5, bx + 6, by + 4, PAL.outline);
+    px(ctx, bx + 6, by + 5, PAL.outline);
+    px(ctx, bx + 6, by + 7, PAL.outline);
+    // Little pointer
+    px(ctx, bx - 2, by + 10, PAL.sashSh);
+    px(ctx, bx - 1, by + 11, PAL.sashSh);
+  }
+
+  // ====================================================================
+  // SPRITE SHEET BUILDING
+  // We pre-render every frame of every state into an offscreen canvas —
+  // one "sprite sheet" canvas per state (horizontal strip of frames).
+  // At animation time, we just drawImage from the sheet onto display.
+  // ====================================================================
+
+  const spriteSheets = {}; // state -> HTMLCanvasElement (sheet W = frames * SPRITE_W, H = SPRITE_H)
+
+  function buildSpriteSheet(state) {
+    const cfg = STATES[state];
+    const sheet = document.createElement('canvas');
+    sheet.width = cfg.frames * SPRITE_W;
+    sheet.height = SPRITE_H;
+    const sctx = sheet.getContext('2d');
+    sctx.imageSmoothingEnabled = false;
+
+    for (let f = 0; f < cfg.frames; f++) {
+      // Draw into a scratch 64x64 context, then blit to sheet
+      const frame = document.createElement('canvas');
+      frame.width = SPRITE_W;
+      frame.height = SPRITE_H;
+      const fctx = frame.getContext('2d');
+      fctx.imageSmoothingEnabled = false;
+
+      drawCompleteFrame(fctx, state, f, cfg.frames);
+
+      sctx.drawImage(frame, f * SPRITE_W, 0, SPRITE_W, SPRITE_H);
+    }
+    return sheet;
+  }
+
+  function buildAllSpriteSheets() {
+    for (const s in STATES) {
+      spriteSheets[s] = buildSpriteSheet(s);
+    }
+  }
+
+  // ====================================================================
+  // DISPLAY + ANIMATION LOOP
+  // ====================================================================
+
+  const petEl = document.getElementById('pet');
+  const displayCanvas = document.createElement('canvas');
+  displayCanvas.width = DISPLAY_W;
+  displayCanvas.height = DISPLAY_H;
+  displayCanvas.style.width = DISPLAY_W + 'px';
+  displayCanvas.style.height = DISPLAY_H + 'px';
+  displayCanvas.style.imageRendering = 'pixelated';
+  petEl.appendChild(displayCanvas);
+
+  const dctx = displayCanvas.getContext('2d');
+  dctx.imageSmoothingEnabled = false;
+
   let currentState = 'idle';
-  let pendingState = null;
   let frame = 0;
   let lastFrameSwitch = performance.now();
   let stateStartedAt = performance.now();
   let clickThrough = false;
 
-  // Drift physics for idle / run
-  const pos = { x: 0, y: 0 };
-  let driftT = Math.random() * 10;
+  buildAllSpriteSheets();
 
-  // ------------------------------------------------------------------
-  // DOM + SVG setup
-  // ------------------------------------------------------------------
-  const petEl = document.getElementById('pet');
-  const svgNS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(svgNS, 'svg');
-  svg.setAttribute('viewBox', `0 0 ${VIEW.w} ${VIEW.h}`);
-  petEl.appendChild(svg);
-
-  const rootG = el('g');
-  svg.appendChild(rootG);
-
-  // Shadowed container: translate is used for world drift; children render at anchor
-  const charG = el('g');           // world position (drift)
-  const shakeG = el('g');          // run shake + fail shock
-  rootG.appendChild(charG);
-  charG.appendChild(shakeG);
-
-  function el(tag, attrs = {}, text) {
-    const e = document.createElementNS(svgNS, tag);
-    for (const k in attrs) e.setAttribute(k, attrs[k]);
-    if (text != null) e.textContent = text;
-    return e;
-  }
-  function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
-
-  // ====================================================================
-  // CHARACTER PARTS — reusable SVG pieces
-  // Each part is drawn in a neutral local coordinate, then transformed.
-  // Anchor of the entire character: (VIEW.anchorX, VIEW.anchorY) = feet on cloud.
-  // ====================================================================
-
-  const COLORS = {
-    coat:      '#f7f5fb',
-    coatLine:  '#c8b8e8',
-    sash:      '#a867e0',
-    sashDark:  '#7a3fbf',
-    skin:      '#f4c9a8',
-    skinDark:  '#c98b66',
-    hair:      '#ffffff',
-    hairLine:  '#cfc5e0',
-    scar:      '#b85450',
-    scarLine:  '#6d2c2a',
-    eyeWhite:  '#ffffff',
-    eyeIris:   '#e04848',
-    eyePupil:  '#1a0f2e',
-    mouth:     '#1a0f2e',
-    tongue:    '#ff7a9a',
-    straw:     '#d9b070',
-    strawDark: '#8f6a38',
-    button:    '#e9c46a',
-    cloud:     '#ffffff',
-    cloudShade:'#e0d8ee',
-    wheel:     '#ffffff',
-    wheelLine: '#b8a6e0',
-    sparkle:   '#ffd94d',
-  };
-
-  // A cloud shape drawn as a series of overlapping circles.
-  function drawCloud(cx, cy, scale = 1, squash = 1, stretch = 1, opts = {}) {
-    const g = el('g', {
-      transform: `translate(${cx} ${cy}) scale(${scale * stretch} ${scale * squash})`,
-      opacity: opts.opacity ?? 1,
-    });
-    const bumps = [
-      [-60, 0, 40], [-28, -18, 36], [8, -22, 38], [40, -14, 34],
-      [62, 4, 30], [36, 14, 28], [-10, 16, 32], [-48, 14, 28],
-    ];
-    for (const [bx, by, br] of bumps) {
-      g.appendChild(el('circle', {
-        cx: bx, cy: by, r: br,
-        fill: COLORS.cloud,
-        stroke: COLORS.cloudShade,
-        'stroke-width': 2,
-      }));
-    }
-    // little fluff puffs
-    for (let i = 0; i < 4; i++) {
-      const a = i * 1.8;
-      g.appendChild(el('circle', {
-        cx: Math.cos(a) * 70, cy: Math.sin(a) * 16 - 6, r: 8,
-        fill: COLORS.cloud, stroke: COLORS.cloudShade, 'stroke-width': 1.5,
-        opacity: 0.8,
-      }));
-    }
-    return g;
-  }
-
-  // Cloud-like hair — fluffy blob around the top of head
-  function drawHair(baseY) {
-    const g = el('g');
-    const puffs = [
-      [0,   -80, 38], [-30, -70, 32], [30, -70, 32],
-      [-48, -50, 28], [48, -50, 28], [-18, -92, 26],
-      [20,  -90, 28], [0,  -104, 22], [-36, -88, 22], [40, -92, 24],
-    ];
-    for (const [px, py, pr] of puffs) {
-      g.appendChild(el('circle', {
-        cx: VIEW.anchorX + px, cy: baseY + py, r: pr,
-        fill: COLORS.hair, stroke: COLORS.hairLine, 'stroke-width': 2,
-      }));
-    }
-    // curly wisps
-    for (let i = 0; i < 6; i++) {
-      const ang = i * 1.05 + 0.4;
-      g.appendChild(el('circle', {
-        cx: VIEW.anchorX + Math.cos(ang) * 52,
-        cy: baseY - 80 + Math.sin(ang) * 30,
-        r: 10, fill: COLORS.hair, stroke: COLORS.hairLine, 'stroke-width': 1.5,
-      }));
-    }
-    return g;
-  }
-
-  // Face with eyes & mouth, mood-dependent
-  function drawFace(baseY, opts = {}) {
-    const { smile = true, laugh = false, shocked = false,
-            eyesClosed = false, tongueOut = false, blink = false } = opts;
-    const g = el('g');
-    const hx = VIEW.anchorX, hy = baseY - 30;
-
-    // face ellipse
-    g.appendChild(el('ellipse', {
-      cx: hx, cy: hy, rx: 34, ry: 36,
-      fill: COLORS.skin, stroke: '#6b3f25', 'stroke-width': 2,
-    }));
-    // scar on chest area actually on face — small cross scar under left eye
-    g.appendChild(el('path', {
-      d: `M ${hx - 16} ${hy + 6} l 6 -6 M ${hx - 16} ${hy} l 6 0`,
-      stroke: COLORS.scarLine, 'stroke-width': 1.5, fill: 'none',
-      'stroke-linecap': 'round',
-    }));
-
-    // Eyes
-    if (shocked) {
-      // big round eyes with white sclera, tiny pupils
-      [[-12, -6], [12, -6]].forEach(([dx, dy]) => {
-        g.appendChild(el('circle', {
-          cx: hx + dx, cy: hy + dy, r: 9,
-          fill: COLORS.eyeWhite, stroke: '#1a0f2e', 'stroke-width': 2,
-        }));
-        g.appendChild(el('circle', {
-          cx: hx + dx, cy: hy + dy, r: 3.5,
-          fill: COLORS.eyePupil,
-        }));
-        g.appendChild(el('circle', {
-          cx: hx + dx - 2, cy: hy + dy - 2, r: 1.2, fill: '#fff',
-        }));
-      });
-    } else if (laugh || eyesClosed || blink) {
-      // closed ^ ^
-      [[-12, -6], [12, -6]].forEach(([dx, dy]) => {
-        g.appendChild(el('path', {
-          d: `M ${hx + dx - 7} ${hy + dy + 2} q 7 -8 14 0`,
-          stroke: '#1a0f2e', 'stroke-width': 2.2, fill: 'none',
-          'stroke-linecap': 'round',
-        }));
-      });
-    } else {
-      [[-12, -6], [12, -6]].forEach(([dx, dy]) => {
-        g.appendChild(el('ellipse', {
-          cx: hx + dx, cy: hy + dy, rx: 3, ry: 4,
-          fill: COLORS.eyePupil,
-        }));
-        g.appendChild(el('circle', {
-          cx: hx + dx - 1, cy: hy + dy - 1.5, r: 1, fill: '#fff',
-        }));
-      });
-    }
-
-    // Mouth
-    if (laugh) {
-      // wide open laugh
-      g.appendChild(el('path', {
-        d: `M ${hx - 14} ${hy + 10} Q ${hx} ${hy + 28} ${hx + 14} ${hy + 10}`,
-        fill: '#1a0f2e', stroke: '#1a0f2e', 'stroke-width': 2,
-      }));
-      if (tongueOut) {
-        g.appendChild(el('path', {
-          d: `M ${hx - 10} ${hy + 18} Q ${hx} ${hy + 34} ${hx + 18} ${hy + 22}`,
-          fill: COLORS.tongue, stroke: '#1a0f2e', 'stroke-width': 1.5,
-        }));
-      }
-    } else if (shocked) {
-      // O mouth
-      g.appendChild(el('ellipse', {
-        cx: hx, cy: hy + 16, rx: 6, ry: 9,
-        fill: '#1a0f2e',
-      }));
-      // tongue sticking out
-      g.appendChild(el('path', {
-        d: `M ${hx - 6} ${hy + 18} Q ${hx} ${hy + 40} ${hx + 10} ${hy + 22}`,
-        fill: COLORS.tongue, stroke: '#1a0f2e', 'stroke-width': 1.5,
-      }));
-    } else if (smile) {
-      g.appendChild(el('path', {
-        d: `M ${hx - 8} ${hy + 14} Q ${hx} ${hy + 20} ${hx + 8} ${hy + 14}`,
-        stroke: '#1a0f2e', 'stroke-width': 2, fill: 'none',
-        'stroke-linecap': 'round',
-      }));
-    } else {
-      g.appendChild(el('path', {
-        d: `M ${hx - 6} ${hy + 14} l 12 0`,
-        stroke: '#1a0f2e', 'stroke-width': 2, 'stroke-linecap': 'round',
-      }));
-    }
-
-    // cheek blush
-    if (!shocked) {
-      g.appendChild(el('circle', { cx: hx - 20, cy: hy + 6, r: 4, fill: '#f7a8a8', opacity: 0.7 }));
-      g.appendChild(el('circle', { cx: hx + 20, cy: hy + 6, r: 4, fill: '#f7a8a8', opacity: 0.7 }));
-    }
-    return g;
-  }
-
-  // Body: coat + purple sash + chest scar mark. Returns group with center at anchor minus bodyHeight.
-  function drawBody(baseY, bodyHeight = 100, tilt = 0, opts = {}) {
-    const g = el('g', {
-      transform: `translate(${VIEW.anchorX} ${baseY - bodyHeight}) rotate(${tilt})`,
-    });
-
-    // Straw hat on the back (behind body)
-    if (opts.showBackpackHat) {
-      const hat = el('g', { transform: 'translate(14 -50) rotate(12)' });
-      hat.appendChild(el('ellipse', {
-        cx: 0, cy: 0, rx: 26, ry: 7,
-        fill: COLORS.straw, stroke: COLORS.strawDark, 'stroke-width': 2,
-      }));
-      hat.appendChild(el('path', {
-        d: 'M -14 -2 q 14 -18 28 0 z',
-        fill: COLORS.straw, stroke: COLORS.strawDark, 'stroke-width': 2,
-      }));
-      hat.appendChild(el('path', {
-        d: 'M -22 0 l 44 0 M -18 3 l 36 0',
-        stroke: COLORS.strawDark, 'stroke-width': 1.2, fill: 'none',
-      }));
-      g.appendChild(hat);
-    }
-
-    // Coat main (open, bell-shaped)
-    const coatPath = `M -38 -30
-                       L  38 -30
-                       L  50 ${bodyHeight - 10}
-                       Q   0 ${bodyHeight + 6} -50 ${bodyHeight - 10} Z`;
-    g.appendChild(el('path', {
-      d: coatPath, fill: COLORS.coat, stroke: COLORS.coatLine, 'stroke-width': 2.5,
-    }));
-
-    // Coat inner shading
-    g.appendChild(el('path', {
-      d: `M -34 -26 L -10 -30 L -8 ${bodyHeight - 15} L -30 ${bodyHeight - 10} Z`,
-      fill: '#ece4f8', stroke: 'none',
-    }));
-
-    // Gold buttons down right side
-    for (let i = 0; i < 4; i++) {
-      g.appendChild(el('circle', {
-        cx: 24, cy: -10 + i * 22, r: 3.2,
-        fill: COLORS.button, stroke: '#a87a20', 'stroke-width': 1,
-      }));
-    }
-
-    // Exposed chest (X-shaped scar) — only upper torso visible
-    g.appendChild(el('path', {
-      d: `M -12 -28 L 14 -28 L 14 -6 L -12 -6 Z`,
-      fill: COLORS.skin, stroke: '#6b3f25', 'stroke-width': 1.8,
-    }));
-    // scar lines
-    g.appendChild(el('path', {
-      d: `M -8 -22 L 10 -10 M -8 -10 L 10 -22 M -10 -17 L 12 -17`,
-      stroke: COLORS.scarLine, 'stroke-width': 1.4, fill: 'none',
-      'stroke-linecap': 'round',
-    }));
-
-    // Purple sash (waist cloth)
-    g.appendChild(el('path', {
-      d: `M -42 ${bodyHeight - 46}
-          Q  0 ${bodyHeight - 54} 42 ${bodyHeight - 46}
-          L  46 ${bodyHeight - 28}
-          Q  0 ${bodyHeight - 20} -46 ${bodyHeight - 28} Z`,
-      fill: COLORS.sash, stroke: COLORS.sashDark, 'stroke-width': 2,
-    }));
-    // Sash tie knot
-    g.appendChild(el('path', {
-      d: `M -14 ${bodyHeight - 42} q 14 12 28 0 q 2 14 -6 18 q -8 -4 -8 -14 z`,
-      fill: COLORS.sashDark, stroke: '#5a2a9a', 'stroke-width': 1.5,
-    }));
-    // sash trailing flutter
-    g.appendChild(el('path', {
-      d: `M -20 ${bodyHeight - 30} q -24 12 -20 36 q 16 -6 22 -22 z`,
-      fill: COLORS.sash, stroke: COLORS.sashDark, 'stroke-width': 1.5,
-      opacity: 0.9,
-    }));
-
-    // White pants (visible between sash and knees)
-    g.appendChild(el('path', {
-      d: `M -24 ${bodyHeight - 30}
-          L -12 ${bodyHeight - 10}
-          L  12 ${bodyHeight - 10}
-          L  24 ${bodyHeight - 30} Z`,
-      fill: '#fff', stroke: COLORS.coatLine, 'stroke-width': 2,
-    }));
-    // fluffy pant cuffs
-    g.appendChild(el('ellipse', {
-      cx: -18, cy: bodyHeight - 8, rx: 14, ry: 5,
-      fill: '#fff', stroke: COLORS.coatLine, 'stroke-width': 2,
-    }));
-    g.appendChild(el('ellipse', {
-      cx: 18, cy: bodyHeight - 8, rx: 14, ry: 5,
-      fill: '#fff', stroke: COLORS.coatLine, 'stroke-width': 2,
-    }));
-
-    return g;
-  }
-
-  // Arm: upper+forearm. anchor at shoulder. Lengths fixed.
-  function drawArm(shoulderX, shoulderY, elbowAngle, handAngle, flip = 1) {
-    const g = el('g', {
-      transform: `translate(${shoulderX} ${shoulderY}) rotate(${flip < 0 ? -elbowAngle : elbowAngle})`,
-    });
-    // upper arm
-    g.appendChild(el('path', {
-      d: 'M -8 -2 L -8 22 L 8 22 L 8 -2 Z',
-      fill: COLORS.coat, stroke: COLORS.coatLine, 'stroke-width': 2,
-    }));
-    // cuff
-    g.appendChild(el('ellipse', {
-      cx: 0, cy: 22, rx: 12, ry: 4, fill: '#fff', stroke: COLORS.coatLine, 'stroke-width': 2,
-    }));
-    // forearm (rotate from shoulder? simpler: bend at elbow)
-    const forearm = el('g', {
-      transform: `translate(0 22) rotate(${flip < 0 ? -handAngle : handAngle})`,
-    });
-    forearm.appendChild(el('path', {
-      d: 'M -7 0 L -7 24 L 7 24 L 7 0 Z',
-      fill: COLORS.skin, stroke: COLORS.skinDark, 'stroke-width': 1.6,
-    }));
-    // hand (fist)
-    forearm.appendChild(el('circle', {
-      cx: 0, cy: 28, r: 8, fill: COLORS.skin, stroke: COLORS.skinDark, 'stroke-width': 1.6,
-    }));
-    g.appendChild(forearm);
-    return g;
-  }
-
-  // Leg: thigh + shin. anchor at hip.
-  function drawLeg(hipX, hipY, thighAngle, kneeAngle, flip = 1) {
-    const g = el('g', {
-      transform: `translate(${hipX} ${hipY}) rotate(${flip < 0 ? -thighAngle : thighAngle})`,
-    });
-    // thigh (white shorts look)
-    g.appendChild(el('path', {
-      d: 'M -10 -2 L -10 26 L 10 26 L 10 -2 Z',
-      fill: '#fff', stroke: COLORS.coatLine, 'stroke-width': 2,
-    }));
-    // shin
-    const shin = el('g', {
-      transform: `translate(0 26) rotate(${flip < 0 ? -kneeAngle : kneeAngle})`,
-    });
-    shin.appendChild(el('path', {
-      d: 'M -8 0 L -8 28 L 8 28 L 8 0 Z',
-      fill: COLORS.skin, stroke: COLORS.skinDark, 'stroke-width': 1.6,
-    }));
-    // sandal foot
-    shin.appendChild(el('ellipse', {
-      cx: 0, cy: 34, rx: 12, ry: 6,
-      fill: COLORS.straw, stroke: COLORS.strawDark, 'stroke-width': 2,
-    }));
-    shin.appendChild(el('path', {
-      d: 'M -10 34 L 10 34 M -6 28 q 6 -6 12 0',
-      stroke: COLORS.strawDark, 'stroke-width': 1.4, fill: 'none',
-    }));
-    g.appendChild(shin);
-    return g;
-  }
-
-  // Energy wheel (replaces foot in run state)
-  function drawWheel(cx, cy, radius, rotation, spinStrength = 1) {
-    const g = el('g', { transform: `translate(${cx} ${cy}) rotate(${rotation})` });
-    // glowing core
-    g.appendChild(el('circle', {
-      cx: 0, cy: 0, r: radius,
-      fill: 'rgba(255,255,255,0.55)',
-      stroke: COLORS.wheelLine, 'stroke-width': 2,
-    }));
-    g.appendChild(el('circle', {
-      cx: 0, cy: 0, r: radius - 6,
-      fill: 'none', stroke: '#fff', 'stroke-width': 1.5,
-      opacity: 0.8,
-    }));
-    // spokes — more at higher spin
-    const spokes = 8;
-    for (let i = 0; i < spokes; i++) {
-      const a = (i / spokes) * 360;
-      g.appendChild(el('path', {
-        d: `M 0 0 L ${Math.cos(a * Math.PI / 180) * radius} ${Math.sin(a * Math.PI / 180) * radius}`,
-        stroke: '#fff', 'stroke-width': 2.5 * spinStrength, opacity: 0.9,
-      }));
-    }
-    // tangential streaks for motion blur
-    for (let i = 0; i < 4; i++) {
-      g.appendChild(el('path', {
-        d: `M ${radius + 4 + i * 3} -${6 + i * 2} l 18 0`,
-        stroke: '#fff', 'stroke-width': 2, opacity: 0.6 - i * 0.12,
-        'stroke-linecap': 'round',
-      }));
-    }
-    return g;
-  }
-
-  // ====================================================================
-  // STATE RENDERERS — each draws a single frame given frame index & total.
-  // The whole character group re-renders every frame (sprite-like).
-  // ====================================================================
-
-  function renderIdle(frame, total) {
-    clear(shakeG);
-    // Gentle breathing — y scale changes over time, slow drift
-    const t = frame / total;
-    const bobY = Math.sin(t * Math.PI * 2) * 3;
-    const driftX = Math.cos(t * Math.PI * 2) * 6;
-    const breathe = 1 + Math.sin(t * Math.PI * 2) * 0.015;
-
-    // Blink happens once per loop at frame ~ total*0.75
-    const blink = (frame === Math.floor(total * 0.75));
-
-    // Cloud under character (very slight squash)
-    const cloudY = VIEW.anchorY;
-    shakeG.appendChild(drawCloud(VIEW.anchorX, cloudY, 1.1, 1 + Math.sin(t * Math.PI * 2) * 0.02,
-                                 1 + Math.cos(t * Math.PI * 2) * 0.02));
-
-    // Body bob
-    const bodyG = el('g', { transform: `translate(${driftX} ${-60 + bobY}) scale(${breathe} ${breathe})` });
-
-    // Body (standing relaxed on cloud) — slight body tilt
-    bodyG.appendChild(drawBody(0, 110, Math.sin(t * Math.PI * 2) * 1.5, { showBackpackHat: true }));
-    // Face & hair — relative to body top
-    const headBase = 0;
-    bodyG.appendChild(drawHair(headBase - 30));
-    bodyG.appendChild(drawFace(headBase, { smile: true, blink }));
-
-    // Arms relaxed at sides (slight swing)
-    const armSwing = Math.sin(t * Math.PI * 2) * 4;
-    bodyG.appendChild(drawArm(-38, -20, 10 + armSwing, 14, 1));
-    bodyG.appendChild(drawArm(38, -20, -10 - armSwing, -14, -1));
-
-    // Legs straight / slight stagger
-    bodyG.appendChild(drawLeg(-18, 60, 2, 0, 1));
-    bodyG.appendChild(drawLeg(18, 60, -2, 0, -1));
-
-    shakeG.appendChild(bodyG);
-  }
-
-  function renderRun(frame, total) {
-    clear(shakeG);
-    const t = frame / total;
-    const cycle = t * Math.PI * 2;
-
-    // Drift: slight body bob and forward tilt — character appears to sprint
-    const tilt = 14;
-    const bobY = Math.abs(Math.sin(cycle)) * -4 - 4;
-
-    // Big running cloud trail behind feet — stretched backward
-    const trailG = el('g');
-    for (let i = 0; i < 5; i++) {
-      const stretch = 1.6 - i * 0.2;
-      trailG.appendChild(drawCloud(VIEW.anchorX + 80 + i * 40, VIEW.anchorY - 4,
-                                   0.8 - i * 0.1,
-                                   0.9 - i * 0.05,
-                                   stretch, { opacity: 0.8 - i * 0.12 }));
-    }
-    shakeG.appendChild(trailG);
-
-    // Speed lines (behind)
-    const linesG = el('g');
-    for (let i = 0; i < 7; i++) {
-      const yOff = (i - 3) * 18;
-      linesG.appendChild(el('path', {
-        d: `M ${VIEW.anchorX + 70} ${VIEW.anchorY - 80 + yOff} l 80 0`,
-        stroke: '#fff', 'stroke-width': 3, opacity: 0.5, 'stroke-linecap': 'round',
-      }));
-    }
-    shakeG.appendChild(linesG);
-
-    // Body — leaned forward, bobbing
-    const bodyG = el('g', {
-      transform: `translate(0 ${bobY}) rotate(${tilt} ${VIEW.anchorX} ${VIEW.anchorY - 70})`,
-    });
-
-    // Legs: 180° phase offset. Use sin for smooth cycle.
-    const legPhase = Math.sin(cycle);
-    const legPhase2 = Math.sin(cycle + Math.PI);
-    // thigh angle driven by phase — between -30° and +30°
-    const thighL = legPhase * 35;
-    const thighR = legPhase2 * 35;
-    // knee bends more when leg is forward
-    const kneeL = 15 + legPhase * 15;
-    const kneeR = 15 + legPhase2 * 15;
-
-    // Arms swing opposite to same-side leg
-    const armL = -legPhase2 * 35;
-    const armR = -legPhase * 35;
-    const forearmL = 30 + Math.abs(legPhase2) * 20;
-    const forearmR = 30 + Math.abs(legPhase) * 20;
-
-    bodyG.appendChild(drawBody(0, 110, 0, { showBackpackHat: true }));
-
-    // excited face — mouth open, determined eyes
-    bodyG.appendChild(drawHair(-30));
-    bodyG.appendChild(drawFace(0, { smile: false, laugh: false }));
-    // over-render mouth as determined grin
-    // Arms swinging
-    bodyG.appendChild(drawArm(-38, -20, armL + 10, forearmL, 1));
-    bodyG.appendChild(drawArm(38, -20, armR - 10, -forearmR, -1));
-
-    // Legs (hips at y ~ 60)
-    bodyG.appendChild(drawLeg(-18, 60, thighL, kneeL, 1));
-    bodyG.appendChild(drawLeg(18, 60, thighR, kneeR, -1));
-
-    shakeG.appendChild(bodyG);
-
-    // Energy wheels at feet — replace shoes. Compute foot world positions approximately.
-    // Simplified: draw wheels below hips, offset by leg phase (more realistic feel).
-    const footLx = VIEW.anchorX - 18 + Math.sin(cycle) * 30;
-    const footLy = VIEW.anchorY - 8 + Math.abs(Math.cos(cycle)) * 6;
-    const footRx = VIEW.anchorX + 18 + Math.sin(cycle + Math.PI) * 30;
-    const footRy = VIEW.anchorY - 8 + Math.abs(Math.cos(cycle + Math.PI)) * 6;
-    const wheelRot = (frame / total) * 720;
-    shakeG.appendChild(drawWheel(footLx, footLy + 6, 22, wheelRot, 1));
-    shakeG.appendChild(drawWheel(footRx, footRy + 6, 22, wheelRot + 40, 1));
-  }
-
-  function renderSuccess(frame, total) {
-    clear(shakeG);
-    const t = frame / total;
-
-    // Phase split: 0-0.3 fall, 0.3-0.7 bounce roll, 0.7-1.0 settle laugh
-    let cloudSquash = 1, cloudStretch = 1;
-    let fallY = 0;
-    let bodyRot = 0;
-    let bodyY = -20;
-    let bodyX = 0;
-
-    if (t < 0.3) {
-      const p = t / 0.3;
-      fallY = p * 60;
-      bodyRot = p * 25;
-      cloudSquash = 1 - p * 0.15;
-      cloudStretch = 1 + p * 0.1;
-    } else if (t < 0.7) {
-      const p = (t - 0.3) / 0.4;
-      // bouncy roll
-      fallY = 60 - Math.sin(p * Math.PI * 3) * 14;
-      bodyRot = 25 + Math.sin(p * Math.PI * 4) * 30;
-      cloudSquash = 0.9 + Math.sin(p * Math.PI * 3) * 0.2;
-      cloudStretch = 1.0 - Math.sin(p * Math.PI * 3) * 0.15;
-    } else {
-      const p = (t - 0.7) / 0.3;
-      fallY = 60 - p * 20;
-      bodyRot = 10 + (1 - p) * 20;
-      cloudSquash = 1 - (1 - p) * 0.1;
-      cloudStretch = 1;
-    }
-
-    bodyY += fallY;
-
-    // Cloud — squash/stretch
-    shakeG.appendChild(drawCloud(VIEW.anchorX, VIEW.anchorY, 1.05, cloudSquash, cloudStretch));
-
-    // Body — lying back, laughing
-    const bodyG = el('g', {
-      transform: `translate(${bodyX} ${bodyY}) rotate(${bodyRot} ${VIEW.anchorX} ${VIEW.anchorY - 100})`,
-    });
-    bodyG.appendChild(drawBody(0, 110, -6, { showBackpackHat: true }));
-    bodyG.appendChild(drawHair(-30));
-    bodyG.appendChild(drawFace(0, { laugh: true, eyesClosed: true }));
-
-    // Arms up / holding head laugh — hands near forehead
-    bodyG.appendChild(drawArm(-38, -30, -60, -90, 1));
-    bodyG.appendChild(drawArm(38, -30, 60, 90, -1));
-    // Legs lifted & splayed
-    bodyG.appendChild(drawLeg(-18, 60, -40, -20, 1));
-    bodyG.appendChild(drawLeg(18, 60, -40, 20, -1));
-    shakeG.appendChild(bodyG);
-
-    // Star particles — appear after fall, more during bounce
-    if (t > 0.25) {
-      const stars = el('g');
-      const count = 5;
-      for (let i = 0; i < count; i++) {
-        const ang = i * 1.3 + t * 2;
-        const radius = 60 + Math.sin(t * 8 + i) * 20;
-        const sx = VIEW.anchorX + Math.cos(ang) * radius - 10;
-        const sy = VIEW.anchorY - 120 + Math.sin(ang) * radius * 0.7;
-        stars.appendChild(drawStar(sx, sy, 6 + (i % 2) * 2, COLORS.sparkle));
-      }
-      shakeG.appendChild(stars);
-    }
-  }
-
-  function renderFail(frame, total) {
-    clear(shakeG);
-    const t = frame / total;
-    // 0-0.2 freeze, 0.2-0.8 violent shake, 0.8-1.0 settle
-    let shake = 0;
-    if (t > 0.15 && t < 0.85) shake = 1;
-
-    // Cloud slightly wobbly
-    shakeG.appendChild(drawCloud(VIEW.anchorX, VIEW.anchorY, 1.0, 1, 1));
-
-    const sx = shake * (Math.sin(frame * 8) * 4);
-    const sy = shake * (Math.cos(frame * 7) * 3);
-    const bodyG = el('g', { transform: `translate(${sx} ${sy - 60})` });
-
-    bodyG.appendChild(drawBody(0, 110, shake * 6, { showBackpackHat: true }));
-    bodyG.appendChild(drawHair(-30));
-    bodyG.appendChild(drawFace(0, { shocked: true, tongueOut: true, eyesClosed: false }));
-
-    // Arms flung up panic
-    bodyG.appendChild(drawArm(-38, -30, -80, -70, 1));
-    bodyG.appendChild(drawArm(38, -30, 80, 70, -1));
-    // Legs splayed
-    bodyG.appendChild(drawLeg(-18, 60, -30, 0, 1));
-    bodyG.appendChild(drawLeg(18, 60, -30, 0, -1));
-
-    shakeG.appendChild(bodyG);
-
-    // Vertical stress lines
-    if (shake) {
-      const lines = el('g');
-      for (let i = -3; i <= 3; i++) {
-        if (i === 0) continue;
-        lines.appendChild(el('path', {
-          d: `M ${VIEW.anchorX + i * 18} ${VIEW.anchorY - 180} l 0 30`,
-          stroke: '#1a0f2e', 'stroke-width': 3, 'stroke-linecap': 'round',
-          opacity: 0.85,
-        }));
-      }
-      shakeG.appendChild(lines);
-    }
-
-    // "!?" popup
-    if (t > 0.1) {
-      const popScale = 1 + Math.sin(t * 15) * 0.08;
-      const popup = el('g', {
-        transform: `translate(${VIEW.anchorX + 70} ${VIEW.anchorY - 190}) scale(${popScale})`,
-      });
-      popup.appendChild(el('circle', {
-        cx: 0, cy: 0, r: 26, fill: '#fff2a8', stroke: '#a06b1a', 'stroke-width': 2.5,
-      }));
-      // "!"
-      popup.appendChild(el('path', {
-        d: 'M -10 -8 l 3 16 M -10 12 l 3 3',
-        stroke: '#1a0f2e', 'stroke-width': 3.5, fill: 'none',
-        'stroke-linecap': 'round',
-      }));
-      popup.appendChild(el('circle', { cx: -9, cy: -4, r: 3, fill: '#1a0f2e' }));
-      // "?"
-      popup.appendChild(el('path', {
-        d: 'M 4 -10 q 10 -2 10 6 q 0 6 -6 8 l -2 6',
-        stroke: '#1a0f2e', 'stroke-width': 3.5, fill: 'none',
-        'stroke-linecap': 'round',
-      }));
-      popup.appendChild(el('circle', { cx: 8, cy: 14, r: 2.5, fill: '#1a0f2e' }));
-      shakeG.appendChild(popup);
-    }
-  }
-
-  function drawStar(cx, cy, r, color) {
-    const pts = [];
-    for (let i = 0; i < 10; i++) {
-      const ang = -Math.PI / 2 + (i * Math.PI) / 5;
-      const rad = i % 2 === 0 ? r : r * 0.45;
-      pts.push(`${cx + Math.cos(ang) * rad},${cy + Math.sin(ang) * rad}`);
-    }
-    return el('polygon', {
-      points: pts.join(' '), fill: color, stroke: '#a87a20', 'stroke-width': 1.2,
-    });
-  }
-
-  // ====================================================================
-  // MAIN LOOP
-  // ====================================================================
-  function render(dt, now) {
+  function renderFrame(dt, now) {
     const cfg = STATES[currentState];
-    const elapsedFrame = 1000 / cfg.fps;
-    if (now - lastFrameSwitch >= elapsedFrame) {
+    const elapsed = now - lastFrameSwitch;
+    const frameDur = 1000 / cfg.fps;
+    if (elapsed >= frameDur) {
       frame = (frame + 1) % cfg.frames;
       lastFrameSwitch = now;
     }
 
-    switch (currentState) {
-      case 'idle':    renderIdle(frame, cfg.frames); break;
-      case 'run':     renderRun(frame, cfg.frames); break;
-      case 'success': renderSuccess(frame, cfg.frames); break;
-      case 'fail':    renderFail(frame, cfg.frames); break;
-    }
+    // Clear display canvas
+    dctx.clearRect(0, 0, DISPLAY_W, DISPLAY_H);
 
-    // Non-looping states → auto-return to idle
+    // Draw current frame from sprite sheet, scaling from SPRITE size to DISPLAY
+    const sheet = spriteSheets[currentState];
+    dctx.drawImage(
+      sheet,
+      frame * SPRITE_W, 0, SPRITE_W, SPRITE_H,
+      0, 0, DISPLAY_W, DISPLAY_H
+    );
+
+    // Auto-return non-looping states to idle
     if (!cfg.loop && cfg.duration > 0) {
       if (now - stateStartedAt >= cfg.duration) {
         setState('idle');
       }
     }
-
-    // Global drift for run state — slow overall x drift relative to stage
-    // (Visual only; window itself stays put.)
-    driftT += dt * (currentState === 'run' ? 0.06 : 0.015);
-    charG.setAttribute(
-      'transform',
-      `translate(${Math.sin(driftT) * 4} ${Math.cos(driftT * 0.7) * 3})`
-    );
   }
 
   function setState(next) {
     if (!STATES[next]) return;
     currentState = next;
-    pendingState = null;
     frame = 0;
     lastFrameSwitch = performance.now();
     stateStartedAt = performance.now();
@@ -755,7 +818,7 @@
   }
 
   // ====================================================================
-  // HUD + INPUT EVENTS
+  // HUD + INPUT
   // ====================================================================
   const hudButtons = document.querySelectorAll('#hud .btn[data-state]');
   const throughBtn = document.getElementById('throughBtn');
@@ -781,7 +844,6 @@
     refreshHud();
   });
 
-  // Keyboard shortcuts
   window.addEventListener('keydown', (e) => {
     if (e.key === '1') setState('idle');
     else if (e.key === '2') setState('run');
@@ -797,7 +859,9 @@
   // Dragging to move window
   let dragging = false, lastX = 0, lastY = 0;
   petEl.addEventListener('mousedown', (e) => {
-    dragging = true; lastX = e.screenX; lastY = e.screenY;
+    dragging = true;
+    lastX = e.screenX;
+    lastY = e.screenY;
     document.body.classList.add('dragging');
     e.preventDefault();
   });
@@ -805,7 +869,8 @@
     if (!dragging) return;
     const dx = e.screenX - lastX;
     const dy = e.screenY - lastY;
-    lastX = e.screenX; lastY = e.screenY;
+    lastX = e.screenX;
+    lastY = e.screenY;
     if (window.petAPI) window.petAPI.dragWindow(dx, dy);
   });
   window.addEventListener('mouseup', () => {
@@ -816,13 +881,10 @@
   refreshHud();
 
   // ====================================================================
-  // ANIMATION LOOP
+  // MAIN ANIMATION LOOP
   // ====================================================================
-  let lastT = performance.now();
   function loop(now) {
-    const dt = now - lastT;
-    lastT = now;
-    render(dt, now);
+    renderFrame(0, now);
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
